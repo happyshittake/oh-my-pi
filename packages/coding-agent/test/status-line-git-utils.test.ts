@@ -9,11 +9,11 @@ import {
 
 describe("parseGitHubRepo", () => {
 	test("parses HTTPS URL", () => {
-		expect(parseGitHubRepo("https://github.com/can1357/oh-my-pi.git")).toBe("can1357/oh-my-pi");
+		expect(parseGitHubRepo("https://github.com/happyshittake/oh-my-pi.git")).toBe("happyshittake/oh-my-pi");
 	});
 
 	test("parses HTTPS URL without .git suffix", () => {
-		expect(parseGitHubRepo("https://github.com/can1357/oh-my-pi")).toBe("can1357/oh-my-pi");
+		expect(parseGitHubRepo("https://github.com/happyshittake/oh-my-pi")).toBe("happyshittake/oh-my-pi");
 	});
 
 	test("parses SSH scp-style URL", () => {

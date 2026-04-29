@@ -12,7 +12,7 @@ import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
 
-const REPO = "can1357/oh-my-pi";
+const REPO = "happyshittake/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 
 interface ReleaseInfo {
