@@ -122,11 +122,18 @@ function isOneOf<T extends string>(value: string, values: readonly T[]): value i
 }
 
 async function runCommand(command: readonly string[]): Promise<number> {
+	// Strip RUSTUP_TOOLCHAIN so that rust-toolchain.toml in the repo root is
+	// respected. This variable is sometimes set globally (e.g. in development
+	// containers) and would otherwise override the project's chosen toolchain.
+	const env = { ...process.env };
+	delete env.RUSTUP_TOOLCHAIN;
+
 	const proc = Bun.spawn([...command], {
 		cwd: repoRoot,
 		stdin: "inherit",
 		stdout: "inherit",
 		stderr: "inherit",
+		env,
 	});
 	return proc.exited;
 }

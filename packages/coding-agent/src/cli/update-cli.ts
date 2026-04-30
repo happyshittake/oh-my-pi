@@ -13,7 +13,6 @@ import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
 
 const REPO = "happyshittake/oh-my-pi";
-const PACKAGE = "@oh-my-pi/pi-coding-agent";
 
 interface ReleaseInfo {
 	tag: string;
@@ -110,18 +109,17 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
 }
 
 /**
- * Get the latest release info from the npm registry.
- * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
+ * Get the latest release info from GitHub releases.
  */
 async function getLatestRelease(): Promise<ReleaseInfo> {
-	const response = await fetch(`https://registry.npmjs.org/${PACKAGE}/latest`);
+	const response = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`);
 	if (!response.ok) {
 		throw new Error(`Failed to fetch release info: ${response.statusText}`);
 	}
 
-	const data = (await response.json()) as { version: string };
-	const version = data.version;
-	const tag = `v${version}`;
+	const data = (await response.json()) as { tag_name: string };
+	const version = data.tag_name.replace(/^v/, "");
+	const tag = data.tag_name;
 
 	return {
 		tag,
@@ -129,22 +127,8 @@ async function getLatestRelease(): Promise<ReleaseInfo> {
 	};
 }
 
-/**
- * Compare semver versions. Returns:
- * - negative if a < b
- * - 0 if a == b
- * - positive if a > b
- */
 function compareVersions(a: string, b: string): number {
-	const pa = a.split(".").map(Number);
-	const pb = b.split(".").map(Number);
-
-	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-		const na = pa[i] || 0;
-		const nb = pb[i] || 0;
-		if (na !== nb) return na - nb;
-	}
-	return 0;
+	return Bun.semver.order(a, b);
 }
 
 /**
@@ -247,7 +231,7 @@ async function printVerification(expectedVersion: string): Promise<void> {
  */
 async function updateViaBun(expectedVersion: string): Promise<void> {
 	console.log(chalk.dim("Updating via bun..."));
-	const result = await $`bun install -g ${PACKAGE}@${expectedVersion}`.nothrow();
+	const result = await $`bun install -g @oh-my-pi/pi-coding-agent@${expectedVersion}`.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`bun install failed with exit code ${result.exitCode}`);
 	}
@@ -273,6 +257,62 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 	}
 	const fileStream = fs.createWriteStream(tempPath, { mode: 0o755 });
 	await pipeline(response.body, fileStream);
+
+	// Download native addon(s)
+	const platform = process.platform;
+	const arch = process.arch;
+	let os: string;
+	switch (platform) {
+		case "linux":
+			os = "linux";
+			break;
+		case "darwin":
+			os = "darwin";
+			break;
+		case "win32":
+			os = "windows";
+			break;
+		default:
+			os = platform;
+	}
+	const archName = arch === "arm64" ? "arm64" : arch;
+	const platformTag = `${os}-${archName}`;
+	const binDir = path.dirname(targetPath);
+
+	const nativeVariants: string[] = [];
+	if (arch === "x64") {
+		nativeVariants.push(`pi_natives.${platformTag}-modern.node`);
+		nativeVariants.push(`pi_natives.${platformTag}-baseline.node`);
+	} else {
+		nativeVariants.push(`pi_natives.${platformTag}.node`);
+	}
+
+	for (const nativeName of nativeVariants) {
+		const nativeUrl = `https://github.com/${REPO}/releases/download/${tag}/${nativeName}`;
+		const nativePath = path.join(binDir, nativeName);
+		const nativeTempPath = `${nativePath}.new`;
+		try {
+			console.log(chalk.dim(`Downloading ${nativeName}…`));
+			const nativeResponse = await fetch(nativeUrl, { redirect: "follow" });
+			if (!nativeResponse.ok || !nativeResponse.body) {
+				console.log(chalk.yellow(`Warning: could not download ${nativeName}: ${nativeResponse.statusText}`));
+				continue;
+			}
+			const nativeStream = fs.createWriteStream(nativeTempPath);
+			await pipeline(nativeResponse.body, nativeStream);
+			try {
+				await fs.promises.unlink(nativePath);
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+			}
+			await fs.promises.rename(nativeTempPath, nativePath);
+		} catch (err) {
+			console.log(chalk.yellow(`Warning: could not download ${nativeName}: ${err}`));
+			try {
+				await fs.promises.unlink(nativeTempPath);
+			} catch {}
+		}
+	}
 
 	console.log(chalk.dim("Installing update..."));
 	try {
