@@ -83,6 +83,8 @@ export interface ThinkingConfig {
 	minLevel: Effort;
 	/** Most intensive supported user-facing effort level. */
 	maxLevel: Effort;
+	/** Optional default effort applied when this model is selected. Falls back to global default if absent. */
+	defaultLevel?: Effort;
 	/** Provider-specific transport used to encode the selected effort. */
 	mode: ThinkingControlMode;
 }
@@ -555,6 +557,14 @@ export interface OpenAICompat {
 	requiresAssistantContentForToolCalls?: boolean;
 	/** Whether the provider supports the `tool_choice` parameter. Default: true. */
 	supportsToolChoice?: boolean;
+	/**
+	 * Drop reasoning fields (`reasoning_effort`, OpenRouter `reasoning`) for
+	 * the request when `tool_choice` forces a tool call. Mirrors the Anthropic
+	 * `disableThinkingIfToolChoiceForced` rule for backends like Kimi that
+	 * 400 with `tool_choice 'specified' is incompatible with thinking
+	 * enabled` whenever both are present. Default: auto-detected (Kimi).
+	 */
+	disableReasoningOnForcedToolChoice?: boolean;
 	/** OpenRouter-specific routing preferences. Only used when baseUrl points to OpenRouter. */
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
@@ -565,6 +575,27 @@ export interface OpenAICompat {
 	supportsStrictMode?: boolean;
 	/** Whether tool schemas must be sent either all strict or all non-strict. Undefined keeps the existing per-tool mixed behavior. */
 	toolStrictMode?: "all_strict" | "none";
+}
+
+/**
+ * Compatibility settings for anthropic-messages API.
+ * Use this to disable features that strict-by-default Anthropic accepts but
+ * that proxy gateways (Vertex AI, AWS Bedrock-style fronts, etc.) reject.
+ */
+export interface AnthropicCompat {
+	/**
+	 * Drop the top-level `strict: true` field on tool definitions. Vertex AI's
+	 * Anthropic-compatible endpoint rejects unknown tool fields with
+	 * `tools.<n>.custom.strict: Extra inputs are not permitted`.
+	 */
+	disableStrictTools?: boolean;
+	/**
+	 * Map adaptive thinking (`thinking: { type: "adaptive" }`) to
+	 * `{ type: "enabled", budget_tokens }`. Vertex AI rejects the `adaptive`
+	 * tag with `Input tag 'adaptive' ... does not match any of the expected
+	 * tags: 'disabled', 'enabled'`.
+	 */
+	disableAdaptiveThinking?: boolean;
 }
 
 /**
@@ -619,8 +650,12 @@ export interface Model<TApi extends Api = any> {
 	priority?: number;
 	/** Canonical thinking capability metadata for this model. */
 	thinking?: ThinkingConfig;
-	/** Compatibility overrides for openai-completions API. If not set, auto-detected from baseUrl. */
-	compat?: TApi extends "openai-completions" ? OpenAICompat : never;
+	/** Compatibility overrides per API. If not set, auto-detected from baseUrl. */
+	compat?: TApi extends "openai-completions"
+		? OpenAICompat
+		: TApi extends "anthropic-messages"
+			? AnthropicCompat
+			: never;
 	/**
 	 * Which shape to use when exposing the Codex `apply_patch` tool to this model.
 	 * Generated catalog policy sets `"freeform"` for first-party GPT-5 Responses

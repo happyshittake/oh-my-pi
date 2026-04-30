@@ -51,7 +51,7 @@ import { getKimiCommonHeaders } from "../utils/oauth/kimi";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry, extractHttpStatusFromError } from "../utils/retry";
 import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
-import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
+import { isForcedToolChoice, mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
 	hasCopilotVisionInput,
@@ -920,6 +920,15 @@ function buildParams(
 		Reflect.set(params, "reasoning_effort", mapReasoningEffort(options.reasoning, compat.reasoningEffortMap));
 	}
 
+	if (compat.disableReasoningOnForcedToolChoice && isForcedToolChoice(params.tool_choice)) {
+		// Mirrors anthropic.ts:disableThinkingIfToolChoiceForced — backends like
+		// Kimi 400 with `tool_choice 'specified' is incompatible with thinking
+		// enabled`. Drop reasoning for this turn instead of dropping tool_choice;
+		// the agent still gets the forced tool call, just without thinking.
+		delete (params as { reasoning_effort?: unknown }).reasoning_effort;
+		delete (params as { reasoning?: unknown }).reasoning;
+	}
+
 	// OpenRouter provider routing preferences
 	if (model.baseUrl.includes("openrouter.ai") && compat.openRouterRouting) {
 		Reflect.set(params, "provider", compat.openRouterRouting);
@@ -1225,10 +1234,6 @@ export function convertMessages(
 			}
 
 			const toolCalls = msg.content.filter(b => b.type === "toolCall") as ToolCall[];
-			const hasReasoningField =
-				(assistantMsg as any).reasoning_content !== undefined ||
-				(assistantMsg as any).reasoning !== undefined ||
-				(assistantMsg as any).reasoning_text !== undefined;
 			// Inject a `reasoning_content` placeholder on assistant tool-call turns when the backend
 			// rejects history without it. The compat flag captures the rule:
 			//   - Kimi (native or via OpenCode-Go): chat completion endpoint demands the field.
@@ -1243,9 +1248,14 @@ export function convertMessages(
 			const stubsReasoningContent =
 				compat.requiresReasoningContentForToolCalls &&
 				(compat.thinkingFormat === "openai" || compat.thinkingFormat === "openrouter");
+			let hasReasoningField =
+				(assistantMsg as any).reasoning_content !== undefined ||
+				(assistantMsg as any).reasoning !== undefined ||
+				(assistantMsg as any).reasoning_text !== undefined;
 			if (toolCalls.length > 0 && stubsReasoningContent && !hasReasoningField) {
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
 				(assistantMsg as any)[reasoningField] = ".";
+				hasReasoningField = true;
 			}
 			if (toolCalls.length > 0) {
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {

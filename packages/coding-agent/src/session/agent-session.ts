@@ -46,6 +46,7 @@ import {
 	calculateRateLimitBackoffMs,
 	getSupportedEfforts,
 	isContextOverflow,
+	isUnexpectedSocketCloseMessage,
 	isUsageLimitError,
 	modelsAreEqual,
 	parseRateLimitReason,
@@ -120,6 +121,7 @@ import {
 } from "../mcp/discoverable-tool-metadata";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import type { PlanModeState } from "../plan-mode/state";
+import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import autoHandoffThresholdFocusPrompt from "../prompts/system/auto-handoff-threshold-focus.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import handoffDocumentPrompt from "../prompts/system/handoff-document.md" with { type: "text" };
@@ -471,7 +473,7 @@ export class AgentSession {
 	#toolChoiceQueue = new ToolChoiceQueue();
 
 	// Bash execution state
-	#bashAbortController: AbortController | undefined = undefined;
+	#bashAbortControllers = new Set<AbortController>();
 	#pendingBashMessages: BashExecutionMessage[] = [];
 
 	// Python execution state
@@ -529,8 +531,7 @@ export class AgentSession {
 	#ttsrRetryToken = 0;
 	#ttsrResumePromise: Promise<void> | undefined = undefined;
 	#ttsrResumeResolve: (() => void) | undefined = undefined;
-	#postPromptTaskCounter = 0;
-	#postPromptTaskIds = new Set<number>();
+	#postPromptTasks = new Set<Promise<void>>();
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
@@ -1148,14 +1149,13 @@ export class AgentSession {
 	}
 
 	#trackPostPromptTask(task: Promise<void>): void {
-		const taskId = ++this.#postPromptTaskCounter;
-		this.#postPromptTaskIds.add(taskId);
+		this.#postPromptTasks.add(task);
 		this.#ensurePostPromptTasksPromise();
 		void task
 			.catch(() => {})
 			.finally(() => {
-				this.#postPromptTaskIds.delete(taskId);
-				if (this.#postPromptTaskIds.size === 0) {
+				this.#postPromptTasks.delete(task);
+				if (this.#postPromptTasks.size === 0) {
 					this.#resolvePostPromptTasks();
 				}
 			});
@@ -1221,11 +1221,11 @@ export class AgentSession {
 			await this.#promptWithMessage(
 				{
 					role: "developer",
-					content: [{ type: "text", text: "Continue if you have next steps." }],
+					content: [{ type: "text", text: autoContinuePrompt }],
 					attribution: "agent",
 					timestamp: Date.now(),
 				},
-				"Continue if you have next steps.",
+				autoContinuePrompt,
 				{ skipPostPromptRecoveryWait: true },
 			);
 		};
@@ -1239,11 +1239,21 @@ export class AgentSession {
 		);
 	}
 
-	#cancelPostPromptTasks(): void {
+	async #cancelPostPromptTasks(): Promise<void> {
 		this.#postPromptTasksAbortController.abort();
 		this.#postPromptTasksAbortController = new AbortController();
-		this.#postPromptTaskIds.clear();
-		this.#resolvePostPromptTasks();
+		this.#resolveTtsrResume();
+
+		const pendingTasks = Array.from(this.#postPromptTasks);
+		if (pendingTasks.length === 0) {
+			this.#resolvePostPromptTasks();
+			return;
+		}
+
+		await Promise.allSettled(pendingTasks);
+		if (this.#postPromptTasks.size === 0) {
+			this.#resolvePostPromptTasks();
+		}
 	}
 	/**
 	 * Wait for retry, TTSR resume, and any background continuation to settle.
@@ -1941,7 +1951,7 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
-		this.#cancelPostPromptTasks();
+		await this.#cancelPostPromptTasks();
 		this.#clearTodoClearTimers();
 		const drained = await this.#asyncJobManager?.dispose({ timeoutMs: 3_000 });
 		const deliveryState = this.#asyncJobManager?.getDeliveryState();
@@ -3416,9 +3426,13 @@ export class AgentSession {
 		this.abortRetry();
 		this.#promptGeneration++;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
-		this.#resolveTtsrResume();
-		this.#cancelPostPromptTasks();
+		this.abortCompaction();
+		this.abortHandoff();
+		this.abortBash();
+		this.abortPython();
+		const postPromptDrain = this.#cancelPostPromptTasks();
 		this.agent.abort();
+		await postPromptDrain;
 		await this.agent.waitForIdle();
 		// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
 		// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
@@ -3613,8 +3627,9 @@ export class AgentSession {
 		);
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
-		// Re-apply the current thinking level for the newly selected model
-		this.setThinkingLevel(this.thinkingLevel);
+		// Re-apply thinking for the newly selected model. Prefer the model's
+		// configured defaultLevel; otherwise preserve the current level.
+		this.setThinkingLevel(model.thinking?.defaultLevel ?? this.thinkingLevel);
 		await this.#syncEditToolModeAfterModelChange(previousEditMode);
 	}
 
@@ -3635,8 +3650,9 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, "temporary");
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
-		// Apply explicit thinking level, or re-clamp current level to new model's capabilities
-		this.setThinkingLevel(thinkingLevel ?? this.thinkingLevel);
+		// Apply explicit thinking level if given; otherwise prefer the model's
+		// configured defaultLevel; otherwise re-clamp the current level.
+		this.setThinkingLevel(thinkingLevel ?? model.thinking?.defaultLevel ?? this.thinkingLevel);
 		await this.#syncEditToolModeAfterModelChange(previousEditMode);
 	}
 
@@ -3934,9 +3950,13 @@ export class AgentSession {
 	 * @param options Optional callbacks for completion/error handling
 	 */
 	async compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
+		if (this.#compactionAbortController) {
+			throw new Error("Compaction already in progress");
+		}
 		this.#disconnectFromAgent();
 		await this.abort();
-		this.#compactionAbortController = new AbortController();
+		const compactionAbortController = new AbortController();
+		this.#compactionAbortController = compactionAbortController;
 
 		try {
 			if (!this.model) {
@@ -3974,7 +3994,7 @@ export class AgentSession {
 					preparation,
 					branchEntries: pathEntries,
 					customInstructions,
-					signal: this.#compactionAbortController.signal,
+					signal: compactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (result?.cancel) {
@@ -4021,7 +4041,7 @@ export class AgentSession {
 					compactionModel,
 					apiKey,
 					customInstructions,
-					this.#compactionAbortController.signal,
+					compactionAbortController.signal,
 					{ promptOverride: hookPrompt, extraContext: hookContext, remoteInstructions: this.#baseSystemPrompt },
 				);
 				summary = result.summary;
@@ -4032,7 +4052,7 @@ export class AgentSession {
 				preserveData = { ...(preserveData ?? {}), ...(result.preserveData ?? {}) };
 			}
 
-			if (this.#compactionAbortController.signal.aborted) {
+			if (compactionAbortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 
@@ -4079,7 +4099,9 @@ export class AgentSession {
 			options?.onError?.(err);
 			throw error;
 		} finally {
-			this.#compactionAbortController = undefined;
+			if (this.#compactionAbortController === compactionAbortController) {
+				this.#compactionAbortController = undefined;
+			}
 			this.#reconnectToAgent();
 		}
 	}
@@ -5321,9 +5343,12 @@ export class AgentSession {
 
 	#isTransientTransportErrorMessage(errorMessage: string): boolean {
 		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504,
-		// service unavailable, network/connection errors, fetch failed, terminated, retry delay exceeded
-		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall/i.test(
-			errorMessage,
+		// service unavailable, network/connection/socket errors, fetch failed, terminated, retry delay exceeded
+		return (
+			isUnexpectedSocketCloseMessage(errorMessage) ||
+			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall/i.test(
+				errorMessage,
+			)
 		);
 	}
 
@@ -5666,15 +5691,16 @@ export class AgentSession {
 			this.agent.replaceMessages(messages.slice(0, -1));
 		}
 
-		// Wait with exponential backoff (abortable)
-		// Properly abort and null existing controller before replacing
-		if (this.#retryAbortController) {
-			this.#retryAbortController.abort();
-		}
-		this.#retryAbortController = new AbortController();
+		// Wait with exponential backoff (abortable).
+		const retryAbortController = new AbortController();
+		this.#retryAbortController?.abort();
+		this.#retryAbortController = retryAbortController;
 		try {
-			await abortableSleep(delayMs, this.#retryAbortController.signal);
+			await abortableSleep(delayMs, retryAbortController.signal);
 		} catch {
+			if (this.#retryAbortController !== retryAbortController) {
+				return false;
+			}
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
@@ -5688,7 +5714,9 @@ export class AgentSession {
 			this.#resolveRetry();
 			return false;
 		}
-		this.#retryAbortController = undefined;
+		if (this.#retryAbortController === retryAbortController) {
+			this.#retryAbortController = undefined;
+		}
 
 		// Retry via continue() outside the agent_end event callback chain.
 		this.#scheduleAgentContinue({ delayMs: 1, generation });
@@ -5780,12 +5808,13 @@ export class AgentSession {
 			}
 		}
 
-		this.#bashAbortController = new AbortController();
+		const abortController = new AbortController();
+		this.#bashAbortControllers.add(abortController);
 
 		try {
 			const result = await executeBashCommand(command, {
 				onChunk,
-				signal: this.#bashAbortController.signal,
+				signal: abortController.signal,
 				sessionKey: this.sessionId,
 				timeout: clampTimeout("bash") * 1000,
 				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
@@ -5794,7 +5823,7 @@ export class AgentSession {
 			this.recordBashResult(command, result, options);
 			return result;
 		} finally {
-			this.#bashAbortController = undefined;
+			this.#bashAbortControllers.delete(abortController);
 		}
 	}
 
@@ -5833,12 +5862,14 @@ export class AgentSession {
 	 * Cancel running bash command.
 	 */
 	abortBash(): void {
-		this.#bashAbortController?.abort();
+		for (const abortController of this.#bashAbortControllers) {
+			abortController.abort();
+		}
 	}
 
 	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
-		return this.#bashAbortController !== undefined;
+		return this.#bashAbortControllers.size > 0;
 	}
 
 	/** Whether there are pending bash messages waiting to be flushed */
