@@ -940,7 +940,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 	},
 	{
 		name: "reload-plugins",
-		description: "Reload all plugins (skills, commands, hooks, tools, agents, MCP)",
+		description: "Reload all plugins (skills, commands, hooks, tools, MCP)",
 		handle: async (_command, runtime) => {
 			// Invalidate the fs content cache for all registry files so
 			// listClaudePluginRoots re-reads from disk on next access.
