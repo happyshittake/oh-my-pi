@@ -2,11 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
     inputs:
       skip_npm:
         description: "Skip npm publish"
@@ -20,7 +16,7 @@ concurrency:
 jobs:
   # Fast lint + type check (no Rust, no native build needed)
   check:
-    runs-on: ubuntu-22.04
+    runs-on: sprinters:aws:ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,13 +38,13 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ startsWith(github.ref, 'refs/tags/v') && fromJSON('[
-          {"os":"ubuntu-22.04","platform":"linux","arch":"x64","variants":"baseline modern","rust_checks":true},
-          {"os":"ubuntu-22.04","platform":"linux","arch":"arm64","target":"aarch64-unknown-linux-gnu"},
-          {"os":"macos-15-intel","platform":"darwin","arch":"x64","variants":"baseline modern"},
-          {"os":"macos-14","platform":"darwin","arch":"arm64"},
-          {"os":"windows-latest","platform":"win32","arch":"x64","variants":"baseline modern"}
+          {"os":"sprinters:aws:ubuntu-22.04","platform":"linux","arch":"x64","variants":"baseline modern","rust_checks":true},
+          {"os":"sprinters:aws:ubuntu-22.04","platform":"linux","arch":"arm64","target":"aarch64-unknown-linux-gnu"},
+          {"os":"sprinters:aws:macos-15-intel","platform":"darwin","arch":"x64","variants":"baseline modern"},
+          {"os":"sprinters:aws:macos-14","platform":"darwin","arch":"arm64"},
+          {"os":"sprinters:aws:windows-latest","platform":"win32","arch":"x64","variants":"baseline modern"}
           ]') || fromJSON('[
-          {"os":"ubuntu-22.04","platform":"linux","arch":"x64","variants":"baseline modern","rust_checks":true}
+          {"os":"sprinters:aws:ubuntu-22.04","platform":"linux","arch":"x64","variants":"baseline modern","rust_checks":true}
           ]') }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -100,7 +96,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    runs-on: ubuntu-22.04
+    runs-on: sprinters:aws:ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -141,7 +137,7 @@ jobs:
         run: bun run ci:test:smoke
 
   install_methods:
-    runs-on: ubuntu-22.04
+    runs-on: sprinters:aws:ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -180,23 +176,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: sprinters:aws:ubuntu-22.04
             target_id: linux-x64
             native_artifact: pi-natives-linux-x64
             binary_path: packages/coding-agent/binaries/omp-linux-x64
-          - os: ubuntu-24.04-arm
+          - os: sprinters:aws:ubuntu-24.04-arm
             target_id: linux-arm64
             native_artifact: pi-natives-linux-arm64
             binary_path: packages/coding-agent/binaries/omp-linux-arm64
-          - os: macos-15-intel
+          - os: sprinters:aws:macos-15-intel
             target_id: darwin-x64
             native_artifact: pi-natives-darwin-x64
             binary_path: packages/coding-agent/binaries/omp-darwin-x64
-          - os: macos-14
+          - os: sprinters:aws:macos-14
             target_id: darwin-arm64
             native_artifact: pi-natives-darwin-arm64
             binary_path: packages/coding-agent/binaries/omp-darwin-arm64
-          - os: windows-latest
+          - os: sprinters:aws:windows-latest
             target_id: win32-x64
             native_artifact: pi-natives-win32-x64
             binary_path: packages/coding-agent/binaries/omp-windows-x64.exe
@@ -248,7 +244,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [release_binary]
-    runs-on: ubuntu-22.04
+    runs-on: sprinters:aws:ubuntu-22.04
     permissions:
       contents: write
       id-token: write
