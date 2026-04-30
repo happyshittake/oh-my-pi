@@ -27,11 +27,11 @@ pub enum CommandWaitResult {
 /// Represents the context for executing a command.
 pub struct ExecutionContext<'a> {
 	/// The shell in which the command is being executed.
-	pub shell:        &'a mut Shell,
+	pub shell: &'a mut Shell,
 	/// The name of the command being executed.    
 	pub command_name: String,
 	/// The parameters for the execution.
-	pub params:       ExecutionParameters,
+	pub params: ExecutionParameters,
 }
 
 impl ExecutionContext<'_> {
@@ -392,8 +392,7 @@ pub(crate) fn execute_external_command(
 
 	// Figure out if we should be setting up a new process group.
 	let new_pg = context.should_cmd_lead_own_process_group();
-	let mut marker_output =
-		prepare_output_markers(&context, executable_path, cmd_args.as_slice());
+	let mut marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
 
 	// Compose the std::process::Command that encapsulates what we want to launch.
 	#[allow(unused_mut, reason = "only mutated on unix platforms")]
@@ -489,9 +488,9 @@ fn prepare_output_markers(
 ) -> Option<(openfiles::OpenFile, ExternalCommandOutputMarkers)> {
 	let marker = context.params.command_output_marker()?;
 	let markers = marker.markers_for_external_command(ExternalCommandInfo {
-		command_name:    context.command_name.as_str(),
+		command_name: context.command_name.as_str(),
 		executable_path,
-		args:            args.iter().map(|arg| arg.as_str()).collect(),
+		args: args.iter().map(|arg| arg.as_str()).collect(),
 	})?;
 	let mut output = context.params.try_stdout(context.shell)?;
 	if output.write_all(markers.start_marker.as_bytes()).is_err() {
