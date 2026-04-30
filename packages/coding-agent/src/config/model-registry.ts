@@ -251,7 +251,7 @@ const ProviderDiscoverySchema = Type.Object({
 	type: Type.Union([Type.Literal("ollama"), Type.Literal("llama.cpp"), Type.Literal("lm-studio")]),
 });
 
-const ProviderAuthSchema = Type.Union([Type.Literal("apiKey"), Type.Literal("none")]);
+const ProviderAuthSchema = Type.Union([Type.Literal("apiKey"), Type.Literal("none"), Type.Literal("oauth")]);
 
 const ProviderConfigSchema = Type.Object({
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
@@ -652,6 +652,7 @@ type CustomModelOverlay = {
 	compat?: Model<Api>["compat"];
 	contextPromotionTarget?: string;
 	premiumMultiplier?: number;
+	isOAuth?: boolean;
 };
 
 function mergeCustomModelHeaders(
@@ -670,6 +671,22 @@ function mergeCustomModelHeaders(
 	return headers;
 }
 
+/**
+ * Decide whether a custom-yaml model should force OAuth-style request shaping.
+ * - Explicit `auth: oauth` → force on.
+ * - Explicit `auth: apiKey` / `auth: none` → leave unset (auto-detect by key prefix).
+ * - No `auth` specified and `api: anthropic-messages` → default on. Custom Anthropic
+ *   endpoints are typically Claude-Code-style proxies (e.g. CLIProxyAPI) that expect
+ *   the cloaked request shape regardless of how the proxy itself is authenticated.
+ * - Otherwise → unset.
+ */
+function resolveCustomModelIsOAuth(api: Api, providerAuth: ProviderAuthMode | undefined): boolean | undefined {
+	if (providerAuth === "oauth") return true;
+	if (providerAuth !== undefined) return undefined;
+	if (api === "anthropic-messages") return true;
+	return undefined;
+}
+
 function buildCustomModelOverlay(
 	providerName: string,
 	providerBaseUrl: string,
@@ -678,6 +695,7 @@ function buildCustomModelOverlay(
 	providerApiKey: string | undefined,
 	authHeader: boolean | undefined,
 	providerCompat: Model<Api>["compat"] | undefined,
+	providerAuth: ProviderAuthMode | undefined,
 	modelDef: CustomModelDefinitionLike,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
@@ -698,6 +716,7 @@ function buildCustomModelOverlay(
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		premiumMultiplier: modelDef.premiumMultiplier,
+		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
 }
 
@@ -729,6 +748,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		compat: resolvedModel.compat,
 		contextPromotionTarget: resolvedModel.contextPromotionTarget,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
+		isOAuth: resolvedModel.isOAuth,
 	} as Model<Api>);
 }
 
@@ -1744,6 +1764,7 @@ export class ModelRegistry {
 					providerConfig.apiKey,
 					providerConfig.authHeader,
 					providerConfig.compat,
+					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
 					modelDef as CustomModelDefinitionLike,
 				);
 				if (!model) continue;
@@ -2134,6 +2155,7 @@ export class ModelRegistry {
 					config.apiKey,
 					config.authHeader,
 					config.compat,
+					undefined,
 					modelDef as CustomModelDefinitionLike,
 				);
 				if (!overlay) {

@@ -104,7 +104,7 @@ import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
-import { resolveLocalUrlToPath } from "../internal-urls";
+import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import {
 	disposeKernelSessionsByOwner,
 	executePython as executePythonCommand,
@@ -244,6 +244,8 @@ export interface AgentSessionConfig {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider payload hook used by the active session request path */
 	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Provider response hook used by the active session request path */
+	onResponse?: SimpleStreamOptions["onResponse"];
 	/** Current session message-to-LLM conversion pipeline */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability */
@@ -507,6 +509,7 @@ export class AgentSession {
 	#toolRegistry: Map<string, AgentTool>;
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
+	#onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#rebuildSystemPrompt: ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>) | undefined;
 	#baseSystemPrompt: string;
@@ -593,6 +596,7 @@ export class AgentSession {
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#onPayload = config.onPayload;
+		this.#onResponse = config.onResponse;
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
@@ -1523,10 +1527,19 @@ export class AgentSession {
 		const path = typeof args.path === "string" ? args.path : undefined;
 		if (!path) return undefined;
 
+		// `local://` URLs (e.g. local://PLAN.md for plan-mode) resolve to a real
+		// on-disk artifacts path; pre-caching works as long as we ask the
+		// local-protocol handler. Other internal-scheme URLs (agent://, skill://,
+		// rule://, mcp://, artifact://) have no stable filesystem representation;
+		// skip pre-cache entirely for those — the edit tool itself will reject
+		// them through its normal dispatch path.
+		const resolvedPath = this.#resolveSessionFsPath(path);
+		if (resolvedPath === undefined) return undefined;
+
 		return {
 			toolCall,
 			path,
-			resolvedPath: resolveToCwd(path, this.sessionManager.getCwd()),
+			resolvedPath,
 			diff: typeof args.diff === "string" ? args.diff : undefined,
 			op: typeof args.op === "string" ? args.op : undefined,
 			rename: typeof args.rename === "string" ? args.rename : undefined,
@@ -1600,9 +1613,45 @@ export class AgentSession {
 	}
 
 	/** Invalidate cache for a file after an edit completes to prevent stale data */
-	#invalidateFileCacheForPath(path: string): void {
-		const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd());
+	#invalidateFileCacheForPath(filePath: string): void {
+		const resolvedPath = this.#resolveSessionFsPath(filePath);
+		if (resolvedPath === undefined) return;
 		this.#streamingEditFileCache.delete(resolvedPath);
+	}
+
+	/**
+	 * Resolve a path supplied to a tool to a real filesystem path.
+	 *
+	 * - `local://` URLs route through the local-protocol handler so they map
+	 *   onto the session's on-disk artifacts directory; pre-caching, ENOENT
+	 *   handling, and post-edit invalidation all work normally.
+	 * - Other internal-scheme URLs (agent://, skill://, rule://, mcp://,
+	 *   artifact://) have no stable filesystem path; this returns `undefined`
+	 *   so callers skip filesystem-only operations.
+	 * - Cwd-relative and absolute paths resolve via `resolveToCwd`.
+	 */
+	#resolveSessionFsPath(filePath: string): string | undefined {
+		const normalized = normalizeLocalScheme(filePath);
+		if (normalized.startsWith("local:")) {
+			return resolveLocalUrlToPath(normalized, this.#localProtocolOptions());
+		}
+		if (
+			normalized.startsWith("agent://") ||
+			normalized.startsWith("skill://") ||
+			normalized.startsWith("rule://") ||
+			normalized.startsWith("mcp://") ||
+			normalized.startsWith("artifact://")
+		) {
+			return undefined;
+		}
+		return resolveToCwd(normalized, this.sessionManager.getCwd());
+	}
+
+	#localProtocolOptions(): LocalProtocolOptions {
+		return {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
+		};
 	}
 
 	#maybeAbortStreamingEdit(event: AgentEvent): void {
@@ -2318,21 +2367,39 @@ export class AgentSession {
 
 	/** Apply session-level stream hooks to a direct side request. */
 	prepareSimpleStreamOptions(options: SimpleStreamOptions): SimpleStreamOptions {
-		if (!this.#onPayload) return options;
-		if (!options.onPayload) {
-			return { ...options, onPayload: this.#onPayload };
-		}
 		const sessionOnPayload = this.#onPayload;
-		const requestOnPayload = options.onPayload;
-		return {
-			...options,
-			onPayload: async (payload, model) => {
-				const sessionPayload = await sessionOnPayload(payload, model);
-				const sessionResolvedPayload = sessionPayload ?? payload;
-				const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
-				return requestPayload ?? sessionResolvedPayload;
-			},
-		};
+		const sessionOnResponse = this.#onResponse;
+		if (!sessionOnPayload && !sessionOnResponse) return options;
+
+		const preparedOptions: SimpleStreamOptions = { ...options };
+
+		if (sessionOnPayload) {
+			if (!options.onPayload) {
+				preparedOptions.onPayload = sessionOnPayload;
+			} else {
+				const requestOnPayload = options.onPayload;
+				preparedOptions.onPayload = async (payload, model) => {
+					const sessionPayload = await sessionOnPayload(payload, model);
+					const sessionResolvedPayload = sessionPayload ?? payload;
+					const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
+					return requestPayload ?? sessionResolvedPayload;
+				};
+			}
+		}
+
+		if (sessionOnResponse) {
+			if (!options.onResponse) {
+				preparedOptions.onResponse = sessionOnResponse;
+			} else {
+				const requestOnResponse = options.onResponse;
+				preparedOptions.onResponse = async (response, model) => {
+					await sessionOnResponse(response, model);
+					await requestOnResponse(response, model);
+				};
+			}
+		}
+
+		return preparedOptions;
 	}
 
 	/** Current steering mode */
@@ -2466,10 +2533,7 @@ export class AgentSession {
 		if (this.#planReferenceSent) return null;
 
 		const planFilePath = this.#planReferencePath;
-		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
-			getSessionId: () => this.sessionManager.getSessionId(),
-		});
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, this.#localProtocolOptions());
 		let planContent: string;
 		try {
 			planContent = await Bun.file(resolvedPlanPath).text();
@@ -2502,15 +2566,9 @@ export class AgentSession {
 		if (!state?.enabled) return null;
 		const sessionPlanUrl = "local://PLAN.md";
 		const resolvedPlanPath = state.planFilePath.startsWith("local:")
-			? resolveLocalUrlToPath(normalizeLocalScheme(state.planFilePath), {
-					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
-					getSessionId: () => this.sessionManager.getSessionId(),
-				})
+			? resolveLocalUrlToPath(normalizeLocalScheme(state.planFilePath), this.#localProtocolOptions())
 			: resolveToCwd(state.planFilePath, this.sessionManager.getCwd());
-		const resolvedSessionPlan = resolveLocalUrlToPath(sessionPlanUrl, {
-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
-			getSessionId: () => this.sessionManager.getSessionId(),
-		});
+		const resolvedSessionPlan = resolveLocalUrlToPath(sessionPlanUrl, this.#localProtocolOptions());
 		const displayPlanPath =
 			state.planFilePath.startsWith("local:") || resolvedPlanPath !== resolvedSessionPlan
 				? state.planFilePath
@@ -6518,6 +6576,8 @@ export class AgentSession {
 		cancelled: boolean;
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
+		/** Raw session context built during navigation — pass to renderInitialMessages to skip a second O(N) walk. */
+		sessionContext?: SessionContext;
 	}> {
 		const oldLeafId = this.sessionManager.getLeafId();
 
@@ -6647,15 +6707,20 @@ export class AgentSession {
 			this.sessionManager.branch(newLeafId);
 		}
 
-		// Update agent state
-		const sessionContext = this.buildDisplaySessionContext();
-		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
-		this.agent.replaceMessages(sessionContext.messages);
+		// Update agent state — build display context to populate agent messages.
+		const stateContext = this.sessionManager.buildSessionContext();
+		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
+		await this.#restoreMCPSelectionsForSessionContext(displayContext);
+		this.agent.replaceMessages(displayContext.messages);
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
-		// Emit session_tree event
-		if (this.#extensionRunner) {
+		this.#branchSummaryAbortController = undefined;
+
+		// Emit session_tree event; only handlers can mutate session entries, so skip
+		// the emit and the context rebuild when no handlers are registered (mirrors
+		// the session_before_tree guard above).
+		if (this.#extensionRunner?.hasHandlers("session_tree")) {
 			await this.#extensionRunner.emit({
 				type: "session_tree",
 				newLeafId: this.sessionManager.getLeafId(),
@@ -6663,10 +6728,10 @@ export class AgentSession {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
+			const rawContext = this.sessionManager.buildSessionContext();
+			return { editorText, cancelled: false, summaryEntry, sessionContext: rawContext };
 		}
-
-		this.#branchSummaryAbortController = undefined;
-		return { editorText, cancelled: false, summaryEntry };
+		return { editorText, cancelled: false, summaryEntry, sessionContext: stateContext };
 	}
 
 	/**

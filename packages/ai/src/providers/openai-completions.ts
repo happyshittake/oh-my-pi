@@ -48,6 +48,7 @@ import {
 import { parseStreamingJson } from "../utils/json-parse";
 import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { getKimiCommonHeaders } from "../utils/oauth/kimi";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry, extractHttpStatusFromError } from "../utils/retry";
 import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
@@ -340,7 +341,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 					headers: requestHeaders,
 					body: params,
 				};
-				return client.chat.completions.create(params, { signal: requestSignal });
+				const { data, response, request_id } = await client.chat.completions
+					.create(params, { signal: requestSignal })
+					.withResponse();
+				await notifyProviderResponse(options, response, model, request_id);
+				return data;
 			};
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
@@ -959,7 +964,7 @@ function getChoiceUsage(choice: ChatCompletionChunk.Choice): object | undefined 
 	return getOptionalObjectProperty(choice, "usage");
 }
 
-function parseChunkUsage(
+export function parseChunkUsage(
 	rawUsage: object,
 	model: Model<"openai-completions">,
 	copilotPremiumRequests: number | undefined,
@@ -970,16 +975,28 @@ function parseChunkUsage(
 		getOptionalNumberProperty(rawUsage, "cached_tokens") ??
 		(promptTokenDetails ? getOptionalNumberProperty(promptTokenDetails, "cached_tokens") : undefined) ??
 		0;
+	// OpenRouter exposes cache writes via `prompt_tokens_details.cache_write_tokens`
+	// and INCLUDES them in `prompt_tokens`. Without subtracting, cache-write tokens
+	// leak into `input` (e.g. GLM/Anthropic via OpenRouter on a fresh cache).
+	// Ref: https://openrouter.ai/docs/guides/best-practices/prompt-caching
+	const cacheWriteTokens = promptTokenDetails
+		? (getOptionalNumberProperty(promptTokenDetails, "cache_write_tokens") ?? 0)
+		: 0;
 	const reasoningTokens =
 		(completionTokenDetails ? getOptionalNumberProperty(completionTokenDetails, "reasoning_tokens") : undefined) ?? 0;
-	const input = (getOptionalNumberProperty(rawUsage, "prompt_tokens") ?? 0) - cachedTokens;
-	const outputTokens = (getOptionalNumberProperty(rawUsage, "completion_tokens") ?? 0) + reasoningTokens;
+	const promptTokens = getOptionalNumberProperty(rawUsage, "prompt_tokens") ?? 0;
+	const input = Math.max(0, promptTokens - cachedTokens - cacheWriteTokens);
+	// Per OpenAI's CompletionUsage spec, `reasoning_tokens` is a subset of
+	// `completion_tokens` (which is the total billed output). Adding them would
+	// double-count.
+	const outputTokens = getOptionalNumberProperty(rawUsage, "completion_tokens") ?? 0;
 	const usage: AssistantMessage["usage"] = {
 		input,
 		output: outputTokens,
 		cacheRead: cachedTokens,
-		cacheWrite: 0,
-		totalTokens: input + outputTokens + cachedTokens,
+		cacheWrite: cacheWriteTokens,
+		totalTokens: input + outputTokens + cachedTokens + cacheWriteTokens,
+		...(reasoningTokens > 0 ? { reasoningTokens } : {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		...(copilotPremiumRequests !== undefined ? { premiumRequests: copilotPremiumRequests } : {}),
 	};

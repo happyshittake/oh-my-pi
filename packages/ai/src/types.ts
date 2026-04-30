@@ -171,6 +171,13 @@ export interface ProviderSessionState {
 	close(): void;
 }
 
+export interface ProviderResponseMetadata {
+	status: number;
+	headers: Record<string, string>;
+	requestId?: string | null;
+	metadata?: Record<string, unknown>;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -221,6 +228,10 @@ export interface StreamOptions {
 	 * Return undefined to keep the payload unchanged.
 	 */
 	onPayload?: (payload: unknown, model?: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
+	/**
+	 * Optional callback for provider response metadata after headers are received.
+	 */
+	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>) => void | Promise<void>;
 	/**
 	 * Optional override for the first streamed event watchdog in milliseconds.
 	 * Set to 0 to disable the first-event watchdog for this request.
@@ -306,12 +317,43 @@ export interface ToolCall {
 }
 
 export interface Usage {
+	/** Non-cached input tokens (matches the bucket the provider bills as new input). */
 	input: number;
+	/** Total output tokens for the turn, including thinking, assistant text, and tool-call argument tokens. */
 	output: number;
+	/** Tokens read from the prompt cache. */
 	cacheRead: number;
+	/** Tokens written to the prompt cache (cache creation). */
 	cacheWrite: number;
+	/** Sum of input + output + cacheRead + cacheWrite. */
 	totalTokens: number;
+	/** Copilot premium-request counter, when applicable. */
 	premiumRequests?: number;
+	/**
+	 * Reasoning/thinking tokens included in `output`, when the provider reports them
+	 * (OpenAI `output_tokens_details.reasoning_tokens`, Google `thoughtsTokenCount`).
+	 * Always a subset of `output` — non-reasoning output is `output - reasoningTokens`.
+	 *
+	 * Providers that don't expose this leave it undefined rather than guessing;
+	 * `undefined` means unknown, NOT zero.
+	 */
+	reasoningTokens?: number;
+	/**
+	 * Cache-write TTL breakdown (Anthropic only). When set, the components sum to
+	 * `cacheWrite`. Absent providers do not populate this.
+	 */
+	cttl?: {
+		ephemeral5m?: number;
+		ephemeral1h?: number;
+	};
+	/**
+	 * Server-side tool invocations made during this turn (Anthropic web_search /
+	 * web_fetch, OpenAI built-in tools when reported). Counts requests, not tokens.
+	 */
+	server?: {
+		webSearch?: number;
+		webFetch?: number;
+	};
 	cost: {
 		input: number;
 		output: number;
@@ -587,4 +629,11 @@ export interface Model<TApi extends Api = any> {
 	 * - `"function"` or undefined: JSON function-tool with `{input: string}` (spec §1.2).
 	 */
 	applyPatchToolType?: "freeform" | "function";
+	/**
+	 * Force OAuth-style request shaping for providers whose API key prefix doesn't
+	 * match an OAuth token (e.g. routing Anthropic traffic through a proxy that
+	 * expects Claude Code framing). When true, the streaming layer sets
+	 * `options.isOAuth = true` for the underlying provider call.
+	 */
+	isOAuth?: boolean;
 }
