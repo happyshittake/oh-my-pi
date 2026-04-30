@@ -2,8 +2,6 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
-import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSkills, loadSkillsFromDir, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
@@ -158,7 +156,6 @@ describe("skills", () => {
 
 			expect(skills.map(s => s.name)).toEqual(expectedFixtureSkillOrder);
 		});
-
 
 		it("should filter out ignoredSkills", async () => {
 			const { skills } = await loadSkills({
