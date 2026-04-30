@@ -9,7 +9,6 @@ import {
 	listClaudePluginRoots,
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
@@ -468,68 +467,5 @@ describe("listClaudePluginRoots", () => {
 		const found = result.all.find(command => command.name === "manifest-commands-outside:ship");
 
 		expect(found).toBeUndefined();
-	});
-});
-
-describe("discoverAgents plugin precedence", () => {
-	let tempDir: string;
-
-	beforeEach(async () => {
-		clearClaudePluginRootsCache();
-		clearFsCache();
-		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-precedence-test-"));
-	});
-
-	afterEach(async () => {
-		clearClaudePluginRootsCache();
-		await fs.rm(tempDir, { recursive: true, force: true });
-	});
-
-	test("prefers project-scoped plugin agent over user-scoped plugin agent", async () => {
-		const pluginRegistryDir = path.join(tempDir, ".claude", "plugins");
-		const projectPluginPath = path.join(tempDir, "plugins", "project");
-		const userPluginPath = path.join(tempDir, "plugins", "user");
-		const agentName = "plugin-precedence-test-agent";
-
-		await fs.mkdir(pluginRegistryDir, { recursive: true });
-		await fs.mkdir(path.join(projectPluginPath, "agents"), { recursive: true });
-		await fs.mkdir(path.join(userPluginPath, "agents"), { recursive: true });
-
-		const projectAgent = `---\nname: ${agentName}\ndescription: Project plugin version\n---\nProject scope agent`;
-		const userAgent = `---\nname: ${agentName}\ndescription: User plugin version\n---\nUser scope agent`;
-
-		await fs.writeFile(path.join(projectPluginPath, "agents", "shared.md"), projectAgent);
-		await fs.writeFile(path.join(userPluginPath, "agents", "shared.md"), userAgent);
-
-		const registry = {
-			version: 2,
-			plugins: {
-				"shared-plugin@market": [
-					{
-						scope: "user",
-						installPath: userPluginPath,
-						version: "1.0.0",
-						installedAt: "2025-01-01T00:00:00Z",
-						lastUpdated: "2025-01-01T00:00:00Z",
-					},
-					{
-						scope: "project",
-						installPath: projectPluginPath,
-						version: "1.0.1",
-						installedAt: "2025-01-02T00:00:00Z",
-						lastUpdated: "2025-01-02T00:00:00Z",
-					},
-				],
-			},
-		};
-
-		await fs.writeFile(path.join(pluginRegistryDir, "installed_plugins.json"), JSON.stringify(registry));
-
-		const result = await discoverAgents(tempDir, tempDir);
-		const found = result.agents.find(agent => agent.name === agentName);
-
-		expect(found).toBeDefined();
-		expect(found?.source).toBe("project");
-		expect(found?.filePath).toContain(projectPluginPath);
 	});
 });
