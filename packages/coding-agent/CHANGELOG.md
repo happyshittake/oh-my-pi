@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added built-in `config-guide` skill that ships with the package and is auto-discovered on fresh install (no manual setup needed)
+- Added package-level skill discovery in builtin provider: scans `getPackageDir()/skills` alongside project and user skill directories
+
+### Fixed
+
+- Fixed JTD-to-JSON-Schema conversion bug that caused explore agent (and any agent with nested `properties` containing `ref` keys) to return empty objects. `isJTDRef` now requires `typeof schema.ref === "string"`, and `isJTDSchema` uses strict type guards instead of loose `in` checks, preventing JSON Schema nodes from being misidentified as JTD
+
 ## [14.6.4] - 2026-05-03
 ### Added
 
