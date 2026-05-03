@@ -21,6 +21,7 @@ import {
 	type ThinkingConfig,
 	unregisterCustomApis,
 } from "@oh-my-pi/pi-ai";
+
 // Sentinel for local-only OAuth token (LM Studio, vLLM) — declared inline to avoid loading
 // any provider module at startup. Must match `DEFAULT_LOCAL_TOKEN` in oauth/lm-studio.ts.
 const DEFAULT_LOCAL_TOKEN = "lm-studio-local";
@@ -341,21 +342,13 @@ function validateProviderConfiguration(
 				!config.baseUrl &&
 				!config.headers &&
 				!config.compat &&
-<<<<<<< HEAD
 				!config.disableStrictTools &&
-				!hasModelOverrides &&
-				!config.discovery
-			) {
-				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "compat", "disableStrictTools", "modelOverrides", "discovery", or "models"`,
-=======
 				!hasModelOverrides &&
 				!config.discovery &&
 				!config.apiKey
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "compat", "modelOverrides", "discovery", "apiKey", or "models"`,
->>>>>>> e69d2c77c (feat: add API key providers to /login selector)
+					`Provider ${providerName}: must specify "baseUrl", "headers", "compat", "disableStrictTools", "modelOverrides", "discovery", "apiKey", or "models"`,
 				);
 			}
 		}
