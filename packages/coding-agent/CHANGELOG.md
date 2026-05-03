@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [14.6.6] - 2026-05-03
+
 ### Added
 
 - Added built-in `config-guide` skill that ships with the package and is auto-discovered on fresh install (no manual setup needed)
